@@ -26,7 +26,7 @@ if (!JWT_SECRET) {
 app.use(cors({
   origin: [
     "http://localhost:5173",
-    "https://video-chat-umber-alpha.vercel.app/"
+    "https://video-chat-umber-alpha.vercel.app"
   ],
   methods: ["GET", "POST"],
   credentials: true

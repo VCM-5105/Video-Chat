@@ -19,7 +19,7 @@ const io = new Server(server, {
   cors: {
     origin: [
       "http://localhost:5173",
-      "https://video-chat-umber-alpha.vercel.app/"
+      "https://video-chat-umber-alpha.vercel.app"
     ],
     methods: ["GET", "POST"],
     credentials: true
