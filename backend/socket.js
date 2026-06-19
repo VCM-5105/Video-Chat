@@ -15,12 +15,16 @@ const matchingQueue = []; // array of socket.ids in queue
 const activeMatches = new Map(); // socket.id -> { partnerSocketId, room, startedAt, partnerId, partnerName }
 
 export function initSocket(server) {
-  const io = new Server(server, {
-    cors: {
-      origin: '*',
-      methods: ['GET', 'POST']
-    }
-  });
+const io = new Server(server, {
+  cors: {
+    origin: [
+      "http://localhost:5173",
+      "https://video-chat-umber-alpha.vercel.app/"
+    ],
+    methods: ["GET", "POST"],
+    credentials: true
+  }
+});
 
   // JWT Authentication for Sockets
   io.use((socket, next) => {

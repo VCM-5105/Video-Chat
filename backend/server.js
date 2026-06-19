@@ -23,7 +23,14 @@ if (!JWT_SECRET) {
     throw new Error("JWT_SECRET environment variable is missing");
 }
 
-app.use(cors());
+app.use(cors({
+  origin: [
+    "http://localhost:5173",
+    "https://video-chat-umber-alpha.vercel.app/"
+  ],
+  methods: ["GET", "POST"],
+  credentials: true
+}));
 app.use(express.json());
 
 
