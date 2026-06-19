@@ -294,7 +294,7 @@ export default function ChatRoom({ socket, token, user }) {
     formData.append('image', file);
 
     try {
-      const res = await fetch('http://localhost:5000/api/upload', {
+      const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/upload', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`
@@ -334,7 +334,7 @@ export default function ChatRoom({ socket, token, user }) {
       socket.emit('block-current-partner');
 
       // Call API to store block in SQLite
-      await fetch('http://localhost:5000/api/block', {
+      await fetch('https://video-chat-backend-c5ap.onrender.com/api/block', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -365,7 +365,7 @@ export default function ChatRoom({ socket, token, user }) {
       socket.emit('block-current-partner');
 
       // POST Report API (which blocks them too)
-      await fetch('http://localhost:5000/api/report', {
+      await fetch('https://video-chat-backend-c5ap.onrender.com/api/report', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

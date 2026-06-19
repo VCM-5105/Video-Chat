@@ -42,7 +42,7 @@ export default function HistoryBoard({ socket, token, user }) {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('http://localhost:5000/api/history', {
+      const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/history', {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -121,7 +121,7 @@ export default function HistoryBoard({ socket, token, user }) {
         isBlocked: !!isBlocked
       });
       
-      const res = await fetch(`http://localhost:5000/api/chat/${partnerId}`, {
+      const res = await fetch(`https://video-chat-backend-c5ap.onrender.com/api/chat/${partnerId}`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -142,7 +142,7 @@ export default function HistoryBoard({ socket, token, user }) {
     const endpoint = isBlocking ? '/api/block' : '/api/unblock';
     
     try {
-      const res = await fetch(`http://localhost:5000${endpoint}`, {
+      const res = await fetch(`https://video-chat-backend-c5ap.onrender.com${endpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -188,7 +188,7 @@ export default function HistoryBoard({ socket, token, user }) {
     formData.append('image', file);
 
     try {
-      const res = await fetch('http://localhost:5000/api/upload', {
+      const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/upload', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`

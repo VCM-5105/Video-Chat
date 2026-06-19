@@ -20,7 +20,7 @@ export default function App() {
 
     async function checkMe() {
       try {
-        const res = await fetch('http://localhost:5000/api/auth/me', {
+        const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/auth/me', {
           headers: {
             'Authorization': `Bearer ${token}`
           }
@@ -52,7 +52,7 @@ export default function App() {
       return;
     }
 
-    const socketInstance = io('http://localhost:5000', {
+    const socketInstance = io('https://video-chat-backend-c5ap.onrender.com', {
       auth: { token }
     });
 
