@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🎥 Random Video Chat
+# Random Video Chat
 
 A modern **Omegle-inspired** real-time video chat platform built with **React, Node.js, Socket.IO, and WebRTC**.
 
