@@ -3,6 +3,7 @@ import {
   MessageSquare, Calendar, Clock, Send, Image as ImageIcon, 
   Smile, X, AlertCircle, Ban, ArrowLeft 
 } from 'lucide-react';
+import { BACKEND_URL } from '../config';
 
 const CURATED_GIFS = [
   { name: 'Popcorn', url: 'https://media.giphy.com/media/t3dL1FZZ0PDqM/giphy.gif', tags: 'popcorn eat funny laugh' },
@@ -48,7 +49,7 @@ export default function HistoryBoard({ socket, token, user }) {
 
   const fetchHistory = useCallback(async () => {
     try {
-      const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/history', {
+      const res = await fetch(`${BACKEND_URL}/api/history`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -76,7 +77,7 @@ export default function HistoryBoard({ socket, token, user }) {
     let ignore = false;
     async function load() {
       try {
-        const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/history', {
+        const res = await fetch(`${BACKEND_URL}/api/history`, {
           headers: {
             'Authorization': `Bearer ${token}`
           }
@@ -148,7 +149,7 @@ export default function HistoryBoard({ socket, token, user }) {
         isBlocked: !!isBlocked
       });
       
-      const res = await fetch(`https://video-chat-backend-c5ap.onrender.com/api/chat/${partnerId}`, {
+      const res = await fetch(`${BACKEND_URL}/api/chat/${partnerId}`, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -168,7 +169,7 @@ export default function HistoryBoard({ socket, token, user }) {
     const endpoint = isBlocking ? '/api/block' : '/api/unblock';
     
     try {
-      const res = await fetch(`https://video-chat-backend-c5ap.onrender.com${endpoint}`, {
+      const res = await fetch(`${BACKEND_URL}${endpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -212,7 +213,7 @@ export default function HistoryBoard({ socket, token, user }) {
     formData.append('image', file);
 
     try {
-      const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/upload', {
+      const res = await fetch(`${BACKEND_URL}/api/upload`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`

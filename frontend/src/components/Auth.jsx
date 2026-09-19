@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { KeyRound, User, AlertCircle, ArrowRight, Video } from 'lucide-react';
+import { BACKEND_URL } from '../config';
 
 export default function Auth({ onAuthSuccess }) {
   const [isLogin, setIsLogin] = useState(true);
@@ -19,7 +20,7 @@ export default function Auth({ onAuthSuccess }) {
 
     const endpoint = isLogin ? '/api/auth/login' : '/api/auth/register';
     try {
-      const response = await fetch(`https://video-chat-backend-c5ap.onrender.com${endpoint}`, {
+      const response = await fetch(`${BACKEND_URL}${endpoint}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

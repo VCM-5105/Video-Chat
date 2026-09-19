@@ -14,17 +14,29 @@ const userProfiles = new Map(); // socket.id -> { id, username }
 const matchingQueue = []; // array of socket.ids in queue
 const activeMatches = new Map(); // socket.id -> { partnerSocketId, room, startedAt, partnerId, partnerName }
 
-export function initSocket(server) {
-const io = new Server(server, {
-  cors: {
-    origin: [
-      "http://localhost:5173",
-      "https://video-chat-umber-alpha.vercel.app"
-    ],
-    methods: ["GET", "POST"],
-    credentials: true
+function removeFromMatchingQueue(socketId) {
+  const index = matchingQueue.indexOf(socketId);
+  if (index !== -1) {
+    matchingQueue.splice(index, 1);
   }
-});
+}
+
+export function initSocket(server) {
+  const corsOriginHandler = (origin, callback) => {
+    if (!origin || origin.includes('localhost') || origin.endsWith('.vercel.app') || origin === 'https://video-chat-umber-alpha.vercel.app') {
+      return callback(null, true);
+    }
+    return callback(null, true);
+  };
+
+  const io = new Server(server, {
+    cors: {
+      origin: corsOriginHandler,
+      methods: ["GET", "POST"],
+      credentials: true
+    },
+    transports: ['websocket', 'polling']
+  });
 
   // JWT Authentication for Sockets
   io.use((socket, next) => {
@@ -59,19 +71,29 @@ const io = new Server(server, {
 
     // --- RANDOM MATCHING ---
     socket.on('search-match', async () => {
-      // Clean up previous match if any
+      // 1. Clean up previous match if any
       await handleDisconnectOrSkip(socket, io);
 
-      // Check if user is already in the matching queue
-      if (matchingQueue.includes(socket.id)) return;
+      // 2. Remove socket from queue if already there to prevent duplicates
+      removeFromMatchingQueue(socket.id);
 
-      // Filter queue to find a user who is NOT blocked by this user, and does not block this user
+      // 3. Purge any disconnected or stale sockets from queue
+      for (let i = matchingQueue.length - 1; i >= 0; i--) {
+        const sId = matchingQueue[i];
+        const s = io.sockets.sockets.get(sId);
+        if (!s || !s.connected || !userProfiles.has(sId)) {
+          matchingQueue.splice(i, 1);
+        }
+      }
+
+      // 4. Find valid partner who is not the same user and not blocked
       let matchedPartnerIndex = -1;
       for (let i = 0; i < matchingQueue.length; i++) {
         const potentialPartnerSocketId = matchingQueue[i];
+        const potentialPartnerSocket = io.sockets.sockets.get(potentialPartnerSocketId);
         const potentialPartnerProfile = userProfiles.get(potentialPartnerSocketId);
         
-        if (potentialPartnerProfile && potentialPartnerProfile.id !== userId) {
+        if (potentialPartnerSocket && potentialPartnerSocket.connected && potentialPartnerProfile && potentialPartnerProfile.id !== userId) {
           const isBlocked = await checkBlock(userId, potentialPartnerProfile.id);
           if (!isBlocked) {
             matchedPartnerIndex = i;
@@ -81,12 +103,11 @@ const io = new Server(server, {
       }
 
       if (matchedPartnerIndex !== -1) {
-        // Match found!
         const partnerSocketId = matchingQueue.splice(matchedPartnerIndex, 1)[0];
         const partnerSocket = io.sockets.sockets.get(partnerSocketId);
         const partnerProfile = userProfiles.get(partnerSocketId);
 
-        if (partnerSocket && partnerProfile) {
+        if (partnerSocket && partnerSocket.connected && partnerProfile) {
           const roomId = `room-${socket.id}-${partnerSocketId}`;
           const startTime = new Date();
 
@@ -125,13 +146,20 @@ const io = new Server(server, {
           });
 
           console.log(`Matched ${username} and ${partnerProfile.username} in room ${roomId}`);
+          return;
         }
-      } else {
-        // Put in queue
-        matchingQueue.push(socket.id);
-        socket.emit('waiting', { message: 'Searching for a partner...' });
-        console.log(`Added ${username} to matching queue. Queue size: ${matchingQueue.length}`);
       }
+
+      // If no match found, put in queue
+      matchingQueue.push(socket.id);
+      socket.emit('waiting', { message: 'Searching for a partner...' });
+      console.log(`Added ${username} to matching queue. Queue size: ${matchingQueue.length}`);
+    });
+
+    // --- CANCEL SEARCH ---
+    socket.on('cancel-search', () => {
+      removeFromMatchingQueue(socket.id);
+      console.log(`${username} cancelled search and was removed from queue.`);
     });
 
     // --- WebRTC SIGNALING ---
@@ -149,11 +177,10 @@ const io = new Server(server, {
     socket.on('send-room-message', (data) => {
       const match = activeMatches.get(socket.id);
       if (match) {
-        // Emit message to room
         io.to(match.room).emit('room-message', {
           senderId: userId,
           senderName: username,
-          type: data.type, // 'text', 'image', 'gif'
+          type: data.type,
           content: data.content,
           sentAt: new Date()
         });
@@ -163,6 +190,7 @@ const io = new Server(server, {
     // --- SKIP / DISCONNECT FROM MATCH ---
     socket.on('skip-match', async () => {
       console.log(`${username} requested skip`);
+      removeFromMatchingQueue(socket.id);
       await handleDisconnectOrSkip(socket, io);
     });
 
@@ -172,14 +200,12 @@ const io = new Server(server, {
       if (!receiverId || !content) return;
 
       try {
-        // Check if there is a block
         const isBlocked = await checkBlock(userId, receiverId);
         if (isBlocked) {
           socket.emit('dm-error', { error: 'Message blocked or recipient unavailable' });
           return;
         }
 
-        // Save message to SQLite
         const messageId = await addMessage(userId, receiverId, type || 'text', content, 1);
         const savedMessage = {
           id: messageId,
@@ -191,10 +217,8 @@ const io = new Server(server, {
           sent_at: new Date()
         };
 
-        // Send confirmation back to sender
         socket.emit('direct-message-sent', savedMessage);
 
-        // If receiver is online, emit real-time message to their socket
         const receiverSocketId = activeSockets.get(receiverId);
         if (receiverSocketId) {
           io.to(receiverSocketId).emit('direct-message', savedMessage);
@@ -205,7 +229,7 @@ const io = new Server(server, {
       }
     });
 
-    // Check online status of specific list of user IDs (from history panel)
+    // Check online status of specific list of user IDs
     socket.on('get-users-status', (userIds, callback) => {
       const statuses = {};
       userIds.forEach(id => {
@@ -218,15 +242,9 @@ const io = new Server(server, {
     socket.on('block-current-partner', async () => {
       const match = activeMatches.get(socket.id);
       if (match) {
-        const partnerId = match.partnerId;
-        const partnerSocketId = match.partnerSocketId;
-
-        // Perform DB block
-        // Note: It's also exposed in HTTP REST API, but handling here cuts the chat immediately
         try {
-          await handleDisconnectOrSkip(socket, io, true); // True means block/report triggered it
-          // We can let the DB REST handler run, or run database insert here
-          // The client will call POST /api/block anyway, but socket disconnect makes it instantaneous.
+          removeFromMatchingQueue(socket.id);
+          await handleDisconnectOrSkip(socket, io, true);
         } catch (err) {
           console.error(err);
         }
@@ -237,20 +255,12 @@ const io = new Server(server, {
     socket.on('disconnect', async () => {
       console.log(`User disconnected: ${username}`);
       
-      // Clean matching queue
-      const queueIndex = matchingQueue.indexOf(socket.id);
-      if (queueIndex !== -1) {
-        matchingQueue.splice(queueIndex, 1);
-      }
-
-      // Handle active chat cleanup
+      removeFromMatchingQueue(socket.id);
       await handleDisconnectOrSkip(socket, io);
 
-      // Clean active references
       activeSockets.delete(userId);
       userProfiles.delete(socket.id);
 
-      // Update online status in DB
       try {
         await updateUserStatus(userId, 'offline');
         socket.broadcast.emit('user-status-changed', { userId, status: 'offline' });
@@ -273,7 +283,6 @@ async function handleDisconnectOrSkip(socket, io, isBlockOrReport = false) {
   const endedAt = new Date();
   const durationSeconds = Math.round((endedAt - startedAt) / 1000);
 
-  // Write log to DB
   try {
     await addHistoryLog(socket.userId, match.partnerId, startedAt.toISOString(), endedAt.toISOString(), durationSeconds);
     await addHistoryLog(match.partnerId, socket.userId, startedAt.toISOString(), endedAt.toISOString(), durationSeconds);
@@ -281,7 +290,6 @@ async function handleDisconnectOrSkip(socket, io, isBlockOrReport = false) {
     console.error('Error logging history to DB:', err);
   }
 
-  // Notify partner
   if (partnerSocket) {
     partnerSocket.emit('peer-disconnected', {
       reason: isBlockOrReport ? 'blocked' : 'skipped',
@@ -290,7 +298,6 @@ async function handleDisconnectOrSkip(socket, io, isBlockOrReport = false) {
     partnerSocket.leave(roomId);
   }
 
-  // Remove matching states
   activeMatches.delete(socket.id);
   activeMatches.delete(partnerSocketId);
 

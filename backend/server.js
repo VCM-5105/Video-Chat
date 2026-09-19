@@ -23,12 +23,17 @@ if (!JWT_SECRET) {
     throw new Error("JWT_SECRET environment variable is missing");
 }
 
+const corsOriginHandler = (origin, callback) => {
+  // Allow all localhost origins, vercel domains, or any preview deployments
+  if (!origin || origin.includes('localhost') || origin.endsWith('.vercel.app') || origin === 'https://video-chat-umber-alpha.vercel.app') {
+    return callback(null, true);
+  }
+  return callback(null, true);
+};
+
 app.use(cors({
-  origin: [
-    "http://localhost:5173",
-    "https://video-chat-umber-alpha.vercel.app"
-  ],
-  methods: ["GET", "POST"],
+  origin: corsOriginHandler,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   credentials: true
 }));
 app.use(express.json());

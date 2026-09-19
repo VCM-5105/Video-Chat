@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import { Video, History, LogOut, User } from 'lucide-react';
+import { BACKEND_URL } from './config';
 import Auth from './components/Auth';
 import ChatRoom from './components/ChatRoom';
 import HistoryBoard from './components/HistoryBoard';
@@ -30,7 +31,7 @@ export default function App() {
     let isMounted = true;
     async function checkMe() {
       try {
-        const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/auth/me', {
+        const res = await fetch(`${BACKEND_URL}/api/auth/me`, {
           headers: {
             'Authorization': `Bearer ${token}`
           }
@@ -64,8 +65,11 @@ export default function App() {
       return;
     }
 
-    const socketInstance = io('https://video-chat-backend-c5ap.onrender.com', {
-      auth: { token }
+    const socketInstance = io(BACKEND_URL, {
+      auth: { token },
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
     });
 
     socketInstance.on('connect', () => {

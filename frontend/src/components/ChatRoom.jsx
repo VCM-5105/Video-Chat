@@ -3,6 +3,7 @@ import {
   Video, VideoOff, Mic, MicOff, SkipForward, Ban, AlertTriangle, 
   Send, Image as ImageIcon, Smile, X, ShieldAlert 
 } from 'lucide-react';
+import { BACKEND_URL } from '../config';
 
 const CURATED_GIFS = [
   { name: 'Popcorn', url: 'https://media.giphy.com/media/t3dL1FZZ0PDqM/giphy.gif', tags: 'popcorn eat funny laugh' },
@@ -19,12 +20,24 @@ const CURATED_GIFS = [
   { name: 'Wink', url: 'https://media.giphy.com/media/12NUBkXghyw3W8/giphy.gif', tags: 'wink eye flirt fun' }
 ];
 
+// Production WebRTC configuration including STUN and free OpenRelay TURN servers for NAT traversal
 const rtcConfig = {
   iceServers: [
-    { urls: 'stun:stun.l.google.com:19002' },
+    { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' }
-  ]
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.relay.metered.ca:80' },
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp'
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    }
+  ],
+  iceCandidatePoolSize: 10
 };
 
 function formatTime(seconds) {
@@ -36,6 +49,7 @@ function formatTime(seconds) {
 export default function ChatRoom({ socket, token, user }) {
   const [status, setStatus] = useState('idle'); // idle, searching, connected
   const [partner, setPartner] = useState(null);
+  const [isSocketConnected, setIsSocketConnected] = useState(socket?.connected || false);
   
   // Media states
   const [localStream, setLocalStream] = useState(null);
@@ -61,15 +75,40 @@ export default function ChatRoom({ socket, token, user }) {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const peerConnectionRef = useRef(null);
+  const candidateQueueRef = useRef([]);
   const chatEndRef = useRef(null);
   const fileInputRef = useRef(null);
   const timerIntervalRef = useRef(null);
+
+  // Monitor socket connection state
+  useEffect(() => {
+    if (!socket) return;
+
+    const onConnect = () => {
+      console.log('Socket connected in ChatRoom');
+      setIsSocketConnected(true);
+    };
+
+    const onDisconnect = () => {
+      console.log('Socket disconnected in ChatRoom');
+      setIsSocketConnected(false);
+    };
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+    };
+  }, [socket]);
 
   const closePeerConnection = useCallback(() => {
     if (peerConnectionRef.current) {
       peerConnectionRef.current.close();
       peerConnectionRef.current = null;
     }
+    candidateQueueRef.current = [];
   }, []);
 
   const stopLocalStream = useCallback(() => {
@@ -89,23 +128,36 @@ export default function ChatRoom({ socket, token, user }) {
 
   const setupPeerConnection = useCallback(async (roomId, isInitiator) => {
     closePeerConnection();
+    candidateQueueRef.current = [];
     
     const pc = new RTCPeerConnection(rtcConfig);
     peerConnectionRef.current = pc;
 
+    // Attach local tracks if available
     if (localStream) {
       localStream.getTracks().forEach(track => {
         pc.addTrack(track, localStream);
       });
     }
 
+    // ICE Candidate handler
     pc.onicecandidate = (event) => {
       if (event.candidate && socket) {
         socket.emit('signal', { signal: { candidate: event.candidate } });
       }
     };
 
+    // Monitor ICE connection status
+    pc.oniceconnectionstatechange = () => {
+      console.log(`ICE Connection State: ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === 'failed') {
+        pc.restartIce();
+      }
+    };
+
+    // Incoming remote track handler
     pc.ontrack = (event) => {
+      console.log('Remote track received:', event.streams[0]);
       if (event.streams && event.streams[0]) {
         setRemoteStream(event.streams[0]);
         if (remoteVideoRef.current) {
@@ -116,7 +168,10 @@ export default function ChatRoom({ socket, token, user }) {
 
     if (isInitiator) {
       try {
-        const offer = await pc.createOffer();
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true
+        });
         await pc.setLocalDescription(offer);
         if (socket) {
           socket.emit('signal', { signal: { sdp: pc.localDescription } });
@@ -165,6 +220,7 @@ export default function ChatRoom({ socket, token, user }) {
     });
 
     socket.on('matched', async (data) => {
+      console.log('Match received:', data);
       setPartner(data.partner);
       setStatus('connected');
       setCallDuration(0);
@@ -184,13 +240,29 @@ export default function ChatRoom({ socket, token, user }) {
       try {
         if (data.signal.sdp) {
           await pc.setRemoteDescription(new RTCSessionDescription(data.signal.sdp));
+
+          // Drain and apply any queued candidates that arrived before remoteDescription
+          while (candidateQueueRef.current.length > 0) {
+            const queuedCandidate = candidateQueueRef.current.shift();
+            try {
+              await pc.addIceCandidate(new RTCIceCandidate(queuedCandidate));
+            } catch (candErr) {
+              console.error('Error applying buffered candidate:', candErr);
+            }
+          }
+
           if (data.signal.sdp.type === 'offer') {
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             socket.emit('signal', { signal: { sdp: pc.localDescription } });
           }
         } else if (data.signal.candidate) {
-          await pc.addIceCandidate(new RTCIceCandidate(data.signal.candidate));
+          // If remoteDescription is not set yet, buffer candidate to prevent exception
+          if (!pc.remoteDescription || !pc.remoteDescription.type) {
+            candidateQueueRef.current.push(data.signal.candidate);
+          } else {
+            await pc.addIceCandidate(new RTCIceCandidate(data.signal.candidate));
+          }
         }
       } catch (err) {
         console.error('Error handling WebRTC signal:', err);
@@ -230,7 +302,7 @@ export default function ChatRoom({ socket, token, user }) {
   }, [messages]);
 
   const startSearch = () => {
-    if (!socket) return;
+    if (!socket || !socket.connected) return;
     setStatus('searching');
     socket.emit('search-match');
   };
@@ -243,8 +315,9 @@ export default function ChatRoom({ socket, token, user }) {
   };
 
   const stopSearch = () => {
-    if (!socket) return;
-    socket.emit('skip-match');
+    if (socket) {
+      socket.emit('cancel-search');
+    }
     setStatus('idle');
     resetChatSession();
   };
@@ -288,7 +361,7 @@ export default function ChatRoom({ socket, token, user }) {
     formData.append('image', file);
 
     try {
-      const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/upload', {
+      const res = await fetch(`${BACKEND_URL}/api/upload`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`
@@ -325,7 +398,7 @@ export default function ChatRoom({ socket, token, user }) {
     try {
       socket.emit('block-current-partner');
 
-      await fetch('https://video-chat-backend-c5ap.onrender.com/api/block', {
+      await fetch(`${BACKEND_URL}/api/block`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -354,7 +427,7 @@ export default function ChatRoom({ socket, token, user }) {
     try {
       socket.emit('block-current-partner');
 
-      await fetch('https://video-chat-backend-c5ap.onrender.com/api/report', {
+      await fetch(`${BACKEND_URL}/api/report`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -508,15 +581,26 @@ export default function ChatRoom({ socket, token, user }) {
             )}
           </div>
 
-          {/* Matching action */}
+          {/* Matching action with connection readiness feedback */}
           <div>
             {status === 'idle' ? (
-              <button 
-                onClick={startSearch}
-                className="py-2 px-4 bg-zinc-100 hover:bg-white active:scale-95 text-zinc-900 font-medium rounded-lg text-xs transition cursor-pointer shadow-xs"
-              >
-                Start Matching
-              </button>
+              !isSocketConnected ? (
+                <button 
+                  disabled
+                  className="py-2 px-4 bg-[#1e222b] text-zinc-500 font-medium rounded-lg text-xs border border-[#2c3240] flex items-center gap-2 cursor-not-allowed select-none"
+                  title="Connecting to server..."
+                >
+                  <div className="w-3 h-3 border-2 border-zinc-600 border-t-zinc-300 rounded-full animate-spin"></div>
+                  <span>Connecting...</span>
+                </button>
+              ) : (
+                <button 
+                  onClick={startSearch}
+                  className="py-2 px-4 bg-zinc-100 hover:bg-white active:scale-95 text-zinc-900 font-medium rounded-lg text-xs transition cursor-pointer shadow-xs"
+                >
+                  Start Matching
+                </button>
+              )
             ) : status === 'searching' ? (
               <button 
                 onClick={stopSearch}
@@ -550,7 +634,7 @@ export default function ChatRoom({ socket, token, user }) {
             )}
           </div>
           <span className="text-[11px] text-zinc-500">
-            {status === 'connected' ? 'Active' : 'Standby'}
+            {status === 'connected' ? 'Active' : isSocketConnected ? 'Ready' : 'Connecting'}
           </span>
         </div>
 
