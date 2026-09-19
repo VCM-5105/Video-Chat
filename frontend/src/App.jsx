@@ -1,23 +1,33 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { io } from 'socket.io-client';
-import { MessageSquare, Video, History, LogOut, User } from 'lucide-react';
+import { Video, History, LogOut, User } from 'lucide-react';
 import Auth from './components/Auth';
 import ChatRoom from './components/ChatRoom';
 import HistoryBoard from './components/HistoryBoard';
 
 export default function App() {
-  const [token, setToken] = useState(localStorage.getItem('token') || '');
+  const [token, setToken] = useState(() => localStorage.getItem('token') || '');
   const [user, setUser] = useState(null);
-  const [activeTab, setActiveTab] = useState('chat'); // 'chat' or 'history'
+  const [activeTab, setActiveTab] = useState('chat');
   const [socket, setSocket] = useState(null);
-  const [checkingAuth, setCheckingAuth] = useState(!!token);
+  const [checkingAuth, setCheckingAuth] = useState(() => !!localStorage.getItem('token'));
+
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('token');
+    setToken('');
+    setUser(null);
+    if (socket) {
+      socket.disconnect();
+      setSocket(null);
+    }
+  }, [socket]);
 
   useEffect(() => {
     if (!token) {
-      setCheckingAuth(false);
       return;
     }
 
+    let isMounted = true;
     async function checkMe() {
       try {
         const res = await fetch('https://video-chat-backend-c5ap.onrender.com/api/auth/me', {
@@ -26,29 +36,31 @@ export default function App() {
           }
         });
         const data = await res.json();
-        if (res.ok) {
-          setUser(data.user);
-          localStorage.setItem('token', token);
-        } else {
-          
-          handleLogout();
+        if (isMounted) {
+          if (res.ok) {
+            setUser(data.user);
+            localStorage.setItem('token', token);
+          } else {
+            handleLogout();
+          }
         }
       } catch (err) {
         console.error('Auth verification error:', err);
       } finally {
-        setCheckingAuth(false);
+        if (isMounted) {
+          setCheckingAuth(false);
+        }
       }
     }
     checkMe();
-  }, [token]);
 
- 
+    return () => {
+      isMounted = false;
+    };
+  }, [token, handleLogout]);
+
   useEffect(() => {
     if (!token || !user) {
-      if (socket) {
-        socket.disconnect();
-        setSocket(null);
-      }
       return;
     }
 
@@ -67,12 +79,14 @@ export default function App() {
       }
     });
 
-    setSocket(socketInstance);
+    queueMicrotask(() => {
+      setSocket(socketInstance);
+    });
 
     return () => {
       socketInstance.disconnect();
     };
-  }, [token, user]);
+  }, [token, user, handleLogout]);
 
   const handleAuthSuccess = (newToken, authUser) => {
     localStorage.setItem('token', newToken);
@@ -80,21 +94,11 @@ export default function App() {
     setUser(authUser);
   };
 
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    setToken('');
-    setUser(null);
-    if (socket) {
-      socket.disconnect();
-      setSocket(null);
-    }
-  };
-
   if (checkingAuth) {
     return (
-      <div className="min-h-screen bg-[#0b0c10] flex flex-col items-center justify-center gap-4 text-indigo-300">
-        <div className="w-10 h-10 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
-        <p className="text-sm font-semibold animate-pulse tracking-wider">Verifying session...</p>
+      <div className="min-h-screen bg-[#0e1013] flex flex-col items-center justify-center gap-3 text-zinc-400">
+        <div className="w-8 h-8 border-2 border-zinc-700 border-t-zinc-300 rounded-full animate-spin"></div>
+        <p className="text-xs font-medium tracking-wide">Verifying session...</p>
       </div>
     );
   }
@@ -104,58 +108,66 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0b0c10] flex flex-col antialiased">
-     
-      <header className="glass border-b border-white/5 sticky top-0 z-40 select-none">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-        
+    <div className="min-h-screen bg-[#0e1013] flex flex-col antialiased text-zinc-200">
+      {/* Sleek Minimal Header */}
+      <header className="bg-[#14161b] border-b border-[#232731] sticky top-0 z-40 select-none">
+        <div className="max-w-7xl mx-auto px-5 h-14 flex items-center justify-between">
+          {/* Logo / Brand */}
           <div className="flex items-center gap-2.5">
-            <div className="h-9 w-9 rounded-xl bg-linear-to-tr from-indigo-500 to-pink-500 flex items-center justify-center glow-indigo">
-              <Video className="w-5 h-5 text-white" />
+            <div className="h-8 w-8 rounded-lg bg-[#1d2028] border border-[#2d3240] flex items-center justify-center text-zinc-200">
+              <Video className="w-4 h-4 text-zinc-300" />
             </div>
-            <span className="text-xl font-bold title-font bg-linear-to-r from-indigo-400 to-pink-400 bg-clip-text text-transparent">
-              Random Chat
+            <span className="text-sm font-semibold text-zinc-100 tracking-tight">
+              RandomChat
             </span>
           </div>
 
-         
-          <div className="flex items-center gap-2 p-1.5 bg-black/30 border border-white/5 rounded-2xl">
+          {/* Navigation Tab Pills */}
+          <div className="flex items-center gap-1 p-1 bg-[#0e1013] border border-[#232731] rounded-lg">
             <button
               onClick={() => setActiveTab('chat')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer ${activeTab === 'chat' ? 'bg-indigo-600 text-white shadow-md glow-indigo' : 'text-gray-400 hover:text-gray-200'}`}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'chat'
+                  ? 'bg-[#222631] text-zinc-100 border border-[#323847] shadow-xs'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#16181e]'
+              }`}
             >
               <Video className="w-3.5 h-3.5" />
               <span>Random Matching</span>
             </button>
             <button
               onClick={() => setActiveTab('history')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 cursor-pointer ${activeTab === 'history' ? 'bg-indigo-600 text-white shadow-md glow-indigo' : 'text-gray-400 hover:text-gray-200'}`}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'history'
+                  ? 'bg-[#222631] text-zinc-100 border border-[#323847] shadow-xs'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-[#16181e]'
+              }`}
             >
               <History className="w-3.5 h-3.5" />
               <span>History & DMs</span>
             </button>
           </div>
 
-          
-          <div className="flex items-center gap-4">
-            <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/5 border border-white/5 text-xs text-gray-300 font-semibold select-none capitalize">
-              <User className="w-3.5 h-3.5 text-indigo-400" />
+          {/* User Profile & Actions */}
+          <div className="flex items-center gap-2.5">
+            <div className="hidden sm:flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-[#181a20] border border-[#242833] text-xs text-zinc-300 font-medium select-none capitalize">
+              <User className="w-3.5 h-3.5 text-zinc-400" />
               <span>{user.username}</span>
             </div>
             
             <button
               onClick={handleLogout}
-              className="p-2.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 active:scale-95 text-red-400 border border-red-500/10 cursor-pointer transition"
+              className="p-2 rounded-lg bg-[#181a20] hover:bg-[#20242e] active:scale-95 text-zinc-400 hover:text-rose-400 border border-[#242833] cursor-pointer transition"
               title="Sign Out"
             >
-              <LogOut className="w-4 h-4" />
+              <LogOut className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
       </header>
 
-     
-      <main className="max-w-7xl mx-auto w-full px-6 py-6 flex-1 flex flex-col justify-start">
+      {/* Content Container */}
+      <main className="max-w-7xl mx-auto w-full px-5 py-5 flex-1 flex flex-col justify-start">
         {activeTab === 'chat' ? (
           <ChatRoom socket={socket} token={token} user={user} />
         ) : (

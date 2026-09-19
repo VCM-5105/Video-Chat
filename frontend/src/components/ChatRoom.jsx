@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Video, VideoOff, Mic, MicOff, SkipForward, Ban, AlertTriangle, 
   Send, Image as ImageIcon, Smile, X, ShieldAlert 
 } from 'lucide-react';
-
 
 const CURATED_GIFS = [
   { name: 'Popcorn', url: 'https://media.giphy.com/media/t3dL1FZZ0PDqM/giphy.gif', tags: 'popcorn eat funny laugh' },
@@ -19,6 +18,20 @@ const CURATED_GIFS = [
   { name: 'Applaud', url: 'https://media.giphy.com/media/11sBLVxNs7v6WA/giphy.gif', tags: 'clap applaud bravo cheer' },
   { name: 'Wink', url: 'https://media.giphy.com/media/12NUBkXghyw3W8/giphy.gif', tags: 'wink eye flirt fun' }
 ];
+
+const rtcConfig = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19002' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' }
+  ]
+};
+
+function formatTime(seconds) {
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
 
 export default function ChatRoom({ socket, token, user }) {
   const [status, setStatus] = useState('idle'); // idle, searching, connected
@@ -52,14 +65,67 @@ export default function ChatRoom({ socket, token, user }) {
   const fileInputRef = useRef(null);
   const timerIntervalRef = useRef(null);
 
-  // WebRTC ICE Configuration
-  const rtcConfig = {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19002' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' }
-    ]
-  };
+  const closePeerConnection = useCallback(() => {
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+  }, []);
+
+  const stopLocalStream = useCallback(() => {
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+    }
+  }, [localStream]);
+
+  const resetChatSession = useCallback(() => {
+    closePeerConnection();
+    setRemoteStream(null);
+    setPartner(null);
+    setMessages([]);
+    setCallDuration(0);
+    clearInterval(timerIntervalRef.current);
+  }, [closePeerConnection]);
+
+  const setupPeerConnection = useCallback(async (roomId, isInitiator) => {
+    closePeerConnection();
+    
+    const pc = new RTCPeerConnection(rtcConfig);
+    peerConnectionRef.current = pc;
+
+    if (localStream) {
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
+    }
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && socket) {
+        socket.emit('signal', { signal: { candidate: event.candidate } });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      if (event.streams && event.streams[0]) {
+        setRemoteStream(event.streams[0]);
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = event.streams[0];
+        }
+      }
+    };
+
+    if (isInitiator) {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        if (socket) {
+          socket.emit('signal', { signal: { sdp: pc.localDescription } });
+        }
+      } catch (err) {
+        console.error('Error creating WebRTC offer:', err);
+      }
+    }
+  }, [closePeerConnection, localStream, socket]);
 
   // Get local media on load
   useEffect(() => {
@@ -72,7 +138,6 @@ export default function ChatRoom({ socket, token, user }) {
         }
       } catch (err) {
         console.error('Error getting media devices:', err);
-        // Try audio only as fallback
         try {
           const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
           setLocalStream(audioStream);
@@ -88,30 +153,27 @@ export default function ChatRoom({ socket, token, user }) {
       closePeerConnection();
       clearInterval(timerIntervalRef.current);
     };
-  }, []);
+  }, [stopLocalStream, closePeerConnection]);
 
   // Set up socket listeners
   useEffect(() => {
     if (!socket) return;
 
-    socket.on('waiting', (data) => {
+    socket.on('waiting', () => {
       setStatus('searching');
       resetChatSession();
     });
 
     socket.on('matched', async (data) => {
-      console.log('Room matched:', data);
       setPartner(data.partner);
       setStatus('connected');
       setCallDuration(0);
       
-      // Start duration clock
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = setInterval(() => {
         setCallDuration(prev => prev + 1);
       }, 1000);
 
-      // Initialize peer connection
       await setupPeerConnection(data.roomId, data.initiator);
     });
 
@@ -140,17 +202,15 @@ export default function ChatRoom({ socket, token, user }) {
     });
 
     socket.on('peer-disconnected', (data) => {
-      console.log('Peer disconnected:', data);
       setStatus('idle');
       clearInterval(timerIntervalRef.current);
       closePeerConnection();
       setRemoteStream(null);
-      // Append a system message
       setMessages(prev => [...prev, {
         senderId: 'system',
         senderName: 'System',
         type: 'text',
-        content: `Conversation ended. Duration: ${formatTime(data.durationSeconds || callDuration)}. Partner ${data.reason === 'blocked' ? 'blocked and reported you.' : 'skipped/disconnected.'}`,
+        content: `Conversation ended (${formatTime(data.durationSeconds || callDuration)}). Partner ${data.reason === 'blocked' ? 'blocked and reported you.' : 'disconnected.'}`,
         sentAt: new Date()
       }]);
     });
@@ -162,77 +222,12 @@ export default function ChatRoom({ socket, token, user }) {
       socket.off('room-message');
       socket.off('peer-disconnected');
     };
-  }, [socket, localStream, callDuration]);
+  }, [socket, callDuration, resetChatSession, setupPeerConnection, closePeerConnection]);
 
   // Scroll to bottom on chat messages
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
-
-  // WebRTC Setup Helper
-  const setupPeerConnection = async (roomId, isInitiator) => {
-    closePeerConnection();
-    
-    const pc = new RTCPeerConnection(rtcConfig);
-    peerConnectionRef.current = pc;
-
-    // Add local tracks
-    if (localStream) {
-      localStream.getTracks().forEach(track => {
-        pc.addTrack(track, localStream);
-      });
-    }
-
-    // ICE Candidate handler
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('signal', { signal: { candidate: event.candidate } });
-      }
-    };
-
-    // Track received
-    pc.ontrack = (event) => {
-      console.log('Received remote track');
-      if (event.streams && event.streams[0]) {
-        setRemoteStream(event.streams[0]);
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = event.streams[0];
-        }
-      }
-    };
-
-    if (isInitiator) {
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit('signal', { signal: { sdp: pc.localDescription } });
-      } catch (err) {
-        console.error('Error creating WebRTC offer:', err);
-      }
-    }
-  };
-
-  const stopLocalStream = () => {
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
-    }
-  };
-
-  const closePeerConnection = () => {
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-    }
-  };
-
-  const resetChatSession = () => {
-    closePeerConnection();
-    setRemoteStream(null);
-    setPartner(null);
-    setMessages([]);
-    setCallDuration(0);
-    clearInterval(timerIntervalRef.current);
-  };
 
   const startSearch = () => {
     if (!socket) return;
@@ -274,7 +269,6 @@ export default function ChatRoom({ socket, token, user }) {
     }
   };
 
-  // Chat message senders
   const sendTextMessage = (e) => {
     e.preventDefault();
     if (!inputText.trim() || !socket) return;
@@ -325,15 +319,12 @@ export default function ChatRoom({ socket, token, user }) {
     setShowGifPicker(false);
   };
 
-  // Block & Report triggers
   const handleBlock = async () => {
     if (!partner || !confirm(`Are you sure you want to block ${partner.username}?`)) return;
 
     try {
-      // Direct block socket signal so it terminates the room immediately
       socket.emit('block-current-partner');
 
-      // Call API to store block in SQLite
       await fetch('https://video-chat-backend-c5ap.onrender.com/api/block', {
         method: 'POST',
         headers: {
@@ -361,10 +352,8 @@ export default function ChatRoom({ socket, token, user }) {
     if (!partner || !reportReason.trim()) return;
 
     try {
-      // Disconnect socket call first
       socket.emit('block-current-partner');
 
-      // POST Report API (which blocks them too)
       await fetch('https://video-chat-backend-c5ap.onrender.com/api/report', {
         method: 'POST',
         headers: {
@@ -390,27 +379,20 @@ export default function ChatRoom({ socket, token, user }) {
     }
   };
 
-  // Utilities
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-
   const filteredGifs = CURATED_GIFS.filter(gif => 
     gif.name.toLowerCase().includes(gifSearch.toLowerCase()) || 
     gif.tags.toLowerCase().includes(gifSearch.toLowerCase())
   );
 
   return (
-    <div className="flex flex-col lg:flex-row gap-6 h-[calc(100vh-140px)] w-full">
+    <div className="flex flex-col lg:flex-row gap-4 h-[calc(100vh-120px)] w-full">
       {/* LEFT: Video & Controls Section */}
-      <div className="flex-1 flex flex-col gap-4 relative h-full">
-        {/* Videos Container */}
-        <div className="flex-1 grid grid-rows-2 sm:grid-rows-1 sm:grid-cols-2 gap-4 relative">
+      <div className="flex-1 flex flex-col gap-3 relative h-full">
+        {/* Videos Grid */}
+        <div className="flex-1 grid grid-rows-2 sm:grid-rows-1 sm:grid-cols-2 gap-3 relative">
           
           {/* LOCAL VIDEO FEED */}
-          <div className="relative rounded-2xl overflow-hidden bg-black/60 border border-white/5 shadow-inner flex items-center justify-center">
+          <div className="relative rounded-xl overflow-hidden bg-[#111317] border border-[#232731] flex items-center justify-center">
             <video 
               ref={localVideoRef} 
               autoPlay 
@@ -418,21 +400,21 @@ export default function ChatRoom({ socket, token, user }) {
               muted 
               className="w-full h-full object-cover"
             />
-            {/* Overlay label */}
-            <div className="absolute top-4 left-4 py-1.5 px-3 rounded-full bg-black/60 backdrop-blur-md text-xs font-semibold text-gray-300 border border-white/10 select-none">
+            
+            <div className="absolute top-3 left-3 py-1 px-2.5 rounded-md bg-[#161820]/90 border border-[#272b36] text-[11px] font-medium text-zinc-300 select-none">
               You ({user.username})
             </div>
-            {/* Status if camera off */}
+
             {!isCamOn && (
-              <div className="absolute inset-0 bg-gray-950 flex flex-col items-center justify-center text-gray-500 gap-2">
-                <VideoOff className="w-12 h-12" />
-                <span className="text-sm">Camera Off</span>
+              <div className="absolute inset-0 bg-[#111317] flex flex-col items-center justify-center text-zinc-500 gap-2">
+                <VideoOff className="w-8 h-8 text-zinc-600" />
+                <span className="text-xs">Camera Off</span>
               </div>
             )}
           </div>
 
           {/* REMOTE VIDEO FEED */}
-          <div className="relative rounded-2xl overflow-hidden bg-black/60 border border-white/5 shadow-inner flex items-center justify-center remote-video">
+          <div className="relative rounded-xl overflow-hidden bg-[#111317] border border-[#232731] flex items-center justify-center remote-video">
             {status === 'connected' && remoteStream ? (
               <video 
                 ref={remoteVideoRef} 
@@ -441,33 +423,30 @@ export default function ChatRoom({ socket, token, user }) {
                 className="w-full h-full object-cover"
               />
             ) : (
-              <div className="absolute inset-0 bg-gray-950/40 flex flex-col items-center justify-center text-center p-6 gap-4">
+              <div className="absolute inset-0 bg-[#111317] flex flex-col items-center justify-center text-center p-6 gap-3">
                 {status === 'searching' ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="relative flex items-center justify-center">
-                      <div className="absolute w-16 h-16 rounded-full border-2 border-indigo-500/30 animate-ping-slow"></div>
-                      <div className="w-12 h-12 rounded-full border-t-2 border-r-2 border-indigo-500 animate-spin"></div>
-                    </div>
-                    <p className="text-indigo-200 font-semibold animate-pulse text-sm">Finding matching peers...</p>
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="w-8 h-8 rounded-full border-2 border-zinc-700 border-t-zinc-300 animate-spin"></div>
+                    <p className="text-zinc-400 font-medium text-xs">Finding a partner...</p>
                   </div>
                 ) : (
-                  <div className="text-gray-500 flex flex-col items-center gap-2">
-                    <Video className="w-12 h-12 text-gray-600" />
-                    <p className="text-sm">Click "Start Matching" to connect with a partner.</p>
+                  <div className="text-zinc-500 flex flex-col items-center gap-2">
+                    <Video className="w-8 h-8 text-zinc-600" />
+                    <p className="text-xs text-zinc-400">Click "Start Matching" to connect with a partner.</p>
                   </div>
                 )}
               </div>
             )}
 
-            {/* Partner Details Overlay */}
+            {/* Connected Partner Overlays */}
             {status === 'connected' && partner && (
               <>
-                <div className="absolute top-4 left-4 py-1.5 px-3 rounded-full bg-black/60 backdrop-blur-md text-xs font-semibold text-gray-300 border border-white/10 select-none flex items-center gap-2">
-                  <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-                  <span>Interacting with: {partner.username}</span>
+                <div className="absolute top-3 left-3 py-1 px-2.5 rounded-md bg-[#161820]/90 border border-[#272b36] text-[11px] font-medium text-zinc-300 select-none flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
+                  <span>Partner: {partner.username}</span>
                 </div>
-                {/* Call Timer clock */}
-                <div className="absolute top-4 right-4 py-1.5 px-3 rounded-full bg-black/60 backdrop-blur-md text-xs font-mono text-indigo-300 border border-white/10 select-none">
+                
+                <div className="absolute top-3 right-3 py-1 px-2.5 rounded-md bg-[#161820]/90 border border-[#272b36] text-[11px] font-mono text-zinc-300 select-none">
                   {formatTime(callDuration)}
                 </div>
               </>
@@ -476,74 +455,82 @@ export default function ChatRoom({ socket, token, user }) {
         </div>
 
         {/* CONTROLLER BAR */}
-        <div className="glass rounded-2xl p-4 flex items-center justify-between gap-4 border border-white/10 shadow-lg">
+        <div className="bg-[#14161b] rounded-xl p-3 flex items-center justify-between gap-3 border border-[#232731]">
           {/* Media Toggles */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <button 
               onClick={toggleCam}
               disabled={status === 'searching'}
-              className={`p-3 rounded-xl cursor-pointer active:scale-95 transition ${isCamOn ? 'bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30' : 'bg-red-500/20 text-red-400 hover:bg-red-500/30'}`}
+              className={`p-2.5 rounded-lg cursor-pointer active:scale-95 transition border text-xs ${
+                isCamOn 
+                  ? 'bg-[#1e222b] text-zinc-200 border-[#2b313e] hover:bg-[#252b36]' 
+                  : 'bg-rose-500/10 text-rose-400 border-rose-500/20 hover:bg-rose-500/20'
+              }`}
               title={isCamOn ? 'Turn Camera Off' : 'Turn Camera On'}
             >
-              {isCamOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+              {isCamOn ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
             </button>
             <button 
               onClick={toggleMic}
               disabled={status === 'searching'}
-              className={`p-3 rounded-xl cursor-pointer active:scale-95 transition ${isMicOn ? 'bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30' : 'bg-red-500/20 text-red-400 hover:bg-red-500/30'}`}
-              title={isMicOn ? 'Mute Mic' : 'Unmute Mic'}
+              className={`p-2.5 rounded-lg cursor-pointer active:scale-95 transition border text-xs ${
+                isMicOn 
+                  ? 'bg-[#1e222b] text-zinc-200 border-[#2b313e] hover:bg-[#252b36]' 
+                  : 'bg-rose-500/10 text-rose-400 border-rose-500/20 hover:bg-rose-500/20'
+              }`}
+              title={isMicOn ? 'Mute Microphone' : 'Unmute Microphone'}
             >
-              {isMicOn ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+              {isMicOn ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
             </button>
           </div>
 
-          {/* Chat Actions */}
-          <div className="flex items-center gap-3">
+          {/* Connected actions */}
+          <div className="flex items-center gap-2">
             {status === 'connected' && (
               <>
                 <button 
                   onClick={handleBlock}
-                  className="px-4 py-2.5 bg-red-600/15 hover:bg-red-600/25 active:scale-95 text-red-400 font-semibold rounded-xl text-xs flex items-center gap-1.5 transition border border-red-500/25 cursor-pointer"
+                  className="px-3 py-2 bg-rose-500/10 hover:bg-rose-500/20 active:scale-95 text-rose-400 font-medium rounded-lg text-xs flex items-center gap-1.5 transition border border-rose-500/20 cursor-pointer"
                   title="Block partner"
                 >
-                  <Ban className="w-4 h-4" />
+                  <Ban className="w-3.5 h-3.5" />
                   <span>Block</span>
                 </button>
                 <button 
                   onClick={() => setShowReportModal(true)}
-                  className="px-4 py-2.5 bg-amber-500/15 hover:bg-amber-500/25 active:scale-95 text-amber-400 font-semibold rounded-xl text-xs flex items-center gap-1.5 transition border border-amber-500/25 cursor-pointer"
-                  title="Report partner for misbehavior"
+                  className="px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 active:scale-95 text-amber-400 font-medium rounded-lg text-xs flex items-center gap-1.5 transition border border-amber-500/20 cursor-pointer"
+                  title="Report partner"
                 >
-                  <AlertTriangle className="w-4 h-4" />
+                  <AlertTriangle className="w-3.5 h-3.5" />
                   <span>Report</span>
                 </button>
               </>
             )}
           </div>
 
-          {/* Matching controls */}
+          {/* Matching action */}
           <div>
             {status === 'idle' ? (
               <button 
                 onClick={startSearch}
-                className="py-2.5 px-6 bg-linear-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 active:scale-95 text-white font-semibold rounded-xl shadow-lg transition duration-200 text-sm cursor-pointer"
+                className="py-2 px-4 bg-zinc-100 hover:bg-white active:scale-95 text-zinc-900 font-medium rounded-lg text-xs transition cursor-pointer shadow-xs"
               >
                 Start Matching
               </button>
             ) : status === 'searching' ? (
               <button 
                 onClick={stopSearch}
-                className="py-2.5 px-6 bg-gray-800 hover:bg-gray-750 active:scale-95 text-gray-300 font-semibold rounded-xl border border-white/10 transition text-sm cursor-pointer"
+                className="py-2 px-4 bg-[#1e222b] hover:bg-[#262c37] active:scale-95 text-zinc-300 font-medium rounded-lg border border-[#2c3240] transition text-xs cursor-pointer"
               >
                 Cancel Search
               </button>
             ) : (
               <button 
                 onClick={skipMatch}
-                className="py-2.5 px-6 bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white font-semibold rounded-xl shadow-lg hover:shadow-indigo-500/20 flex items-center gap-2 transition text-sm cursor-pointer"
+                className="py-2 px-4 bg-[#222733] hover:bg-[#2b3140] text-zinc-100 font-medium rounded-lg border border-[#343b4c] flex items-center gap-1.5 transition text-xs cursor-pointer active:scale-95"
               >
-                <span>Skip Partner</span>
-                <SkipForward className="w-4 h-4" />
+                <span>Next</span>
+                <SkipForward className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
@@ -551,33 +538,34 @@ export default function ChatRoom({ socket, token, user }) {
       </div>
 
       {/* RIGHT: Text Chat Sidebar Section */}
-      <div className="w-full lg:w-96 glass rounded-3xl flex flex-col border border-white/10 shadow-2xl relative overflow-hidden h-full">
+      <div className="w-full lg:w-80 bg-[#14161b] rounded-xl flex flex-col border border-[#232731] overflow-hidden h-full">
         {/* Sidebar Header */}
-        <div className="p-4 border-b border-white/5 flex items-center justify-between bg-black/20">
+        <div className="p-3 border-b border-[#232731] flex items-center justify-between bg-[#111317]">
           <div className="flex items-center gap-2">
-            <h2 className="font-semibold text-sm title-font text-gray-200">Text Chat Session</h2>
+            <span className="font-medium text-xs text-zinc-200">Text Chat</span>
             {status === 'connected' && (
               <span className="flex h-2 w-2 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
               </span>
             )}
           </div>
-          <span className="text-xs text-gray-500 font-medium">Omegle style</span>
+          <span className="text-[11px] text-zinc-500">
+            {status === 'connected' ? 'Active' : 'Standby'}
+          </span>
         </div>
 
         {/* Message Panel */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-50">
+        <div className="flex-1 overflow-y-auto p-3.5 space-y-3 min-h-50">
           {messages.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-center text-gray-500 p-6">
-              <Smile className="w-8 h-8 mb-2 opacity-35" />
-              <p className="text-xs">No messages yet. Send a message to break the ice!</p>
+            <div className="h-full flex flex-col items-center justify-center text-center text-zinc-500 p-4">
+              <Smile className="w-7 h-7 mb-2 opacity-30" />
+              <p className="text-xs">No messages yet.</p>
             </div>
           ) : (
             messages.map((msg, idx) => {
               if (msg.senderId === 'system') {
                 return (
-                  <div key={idx} className="p-3 bg-white/5 border border-white/5 rounded-2xl text-center text-xs text-gray-400 leading-relaxed animate-fade-in">
+                  <div key={idx} className="p-2 bg-[#101216] border border-[#20232c] rounded-lg text-center text-xs text-zinc-400 leading-relaxed animate-fade-in">
                     {msg.content}
                   </div>
                 );
@@ -586,22 +574,24 @@ export default function ChatRoom({ socket, token, user }) {
               const isSelf = msg.senderId === user.id;
               return (
                 <div key={idx} className={`flex flex-col max-w-[85%] ${isSelf ? 'ml-auto items-end' : 'mr-auto items-start'} animate-fade-in`}>
-                  {/* Sender Name */}
-                  <span className="text-[10px] text-gray-500 font-semibold mb-1 px-1">{msg.senderName}</span>
+                  <span className="text-[10px] text-zinc-500 font-medium mb-1 px-1">{msg.senderName}</span>
                   
-                  {/* Speech bubble contents */}
-                  <div className={`p-3 rounded-2xl text-sm ${isSelf ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white/10 text-gray-200 rounded-tl-none border border-white/5'}`}>
+                  <div className={`p-2.5 rounded-lg text-xs leading-relaxed ${
+                    isSelf 
+                      ? 'bg-[#222733] text-zinc-100 border border-[#303746] rounded-tr-none' 
+                      : 'bg-[#191c22] text-zinc-200 border border-[#262b35] rounded-tl-none'
+                  }`}>
                     {msg.type === 'text' && (
-                      <p className="break-all whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                      <p className="break-all whitespace-pre-wrap">{msg.content}</p>
                     )}
                     {msg.type === 'image' && (
-                      <a href={msg.content} target="_blank" rel="noopener noreferrer" className="block overflow-hidden rounded-lg border border-black/20 hover:opacity-90">
-                        <img src={msg.content} alt="Shared upload" className="max-w-50 max-h-40 object-cover" />
+                      <a href={msg.content} target="_blank" rel="noopener noreferrer" className="block overflow-hidden rounded border border-[#262b35] hover:opacity-90">
+                        <img src={msg.content} alt="Shared upload" className="max-w-44 max-h-36 object-cover" />
                       </a>
                     )}
                     {msg.type === 'gif' && (
-                      <div className="overflow-hidden rounded-lg border border-black/20">
-                        <img src={msg.content} alt="Reaction GIF" className="max-w-50 max-h-40 object-cover" />
+                      <div className="overflow-hidden rounded border border-[#262b35]">
+                        <img src={msg.content} alt="Reaction GIF" className="max-w-44 max-h-36 object-cover" />
                       </div>
                     )}
                   </div>
@@ -613,40 +603,40 @@ export default function ChatRoom({ socket, token, user }) {
         </div>
 
         {/* Input Bar */}
-        <form onSubmit={sendTextMessage} className="p-3 border-t border-white/5 bg-black/10 flex flex-col gap-2 relative">
+        <form onSubmit={sendTextMessage} className="p-2.5 border-t border-[#232731] bg-[#111317] flex flex-col gap-2 relative">
           
           {/* GIF PICKER POPOVER */}
           {showGifPicker && (
-            <div className="absolute bottom-16 left-3 right-3 bg-gray-950/95 border border-white/10 rounded-2xl p-3 shadow-2xl flex flex-col z-20 h-64 animate-fade-in backdrop-blur-xl">
+            <div className="absolute bottom-14 left-2 right-2 bg-[#161820] border border-[#272b36] rounded-xl p-3 shadow-xl flex flex-col z-20 h-60 animate-fade-in">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-semibold text-gray-300">Choose Reaction GIF</span>
+                <span className="text-xs font-medium text-zinc-300">Reaction GIF</span>
                 <button 
                   type="button" 
                   onClick={() => setShowGifPicker(false)}
-                  className="p-1 rounded-full text-gray-400 hover:bg-white/10 cursor-pointer"
+                  className="p-1 rounded text-zinc-400 hover:text-zinc-200 hover:bg-[#20242e] cursor-pointer"
                 >
-                  <X className="w-4 h-4" />
+                  <X className="w-3.5 h-3.5" />
                 </button>
               </div>
 
               <input 
                 type="text" 
-                placeholder="Search reaction GIFs..."
+                placeholder="Search GIFs..."
                 value={gifSearch}
                 onChange={(e) => setGifSearch(e.target.value)}
-                className="w-full py-1.5 px-3 bg-white/5 border border-white/10 rounded-xl text-xs text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 mb-3"
+                className="w-full py-1.5 px-2.5 bg-[#0e1013] border border-[#262b35] rounded-lg text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-400 mb-2"
               />
 
-              <div className="flex-1 overflow-y-auto grid grid-cols-3 gap-2">
+              <div className="flex-1 overflow-y-auto grid grid-cols-3 gap-1.5">
                 {filteredGifs.length === 0 ? (
-                  <div className="col-span-3 text-center text-xs text-gray-500 py-6">No matching GIFs found</div>
+                  <div className="col-span-3 text-center text-xs text-zinc-500 py-4">No matching GIFs found</div>
                 ) : (
                   filteredGifs.map((gif, idx) => (
                     <button 
                       key={idx}
                       type="button"
                       onClick={() => sendGif(gif.url)}
-                      className="overflow-hidden rounded-lg border border-white/5 hover:border-indigo-500 transition cursor-pointer h-16 bg-black flex items-center justify-center"
+                      className="overflow-hidden rounded border border-[#262b35] hover:border-zinc-400 transition cursor-pointer h-14 bg-black flex items-center justify-center"
                     >
                       <img src={gif.url} alt={gif.name} className="w-full h-full object-cover" />
                     </button>
@@ -657,8 +647,7 @@ export default function ChatRoom({ socket, token, user }) {
           )}
 
           {/* Form Actions and Text Input */}
-          <div className="flex items-center gap-2">
-            {/* Image attachment */}
+          <div className="flex items-center gap-1.5">
             <input 
               type="file" 
               ref={fileInputRef} 
@@ -670,44 +659,41 @@ export default function ChatRoom({ socket, token, user }) {
               type="button"
               disabled={status !== 'connected' || uploadingImage}
               onClick={() => fileInputRef.current?.click()}
-              className="p-2 rounded-xl text-gray-400 hover:text-indigo-400 active:scale-95 disabled:opacity-30 disabled:scale-100 transition hover:bg-white/5 cursor-pointer shrink-0"
+              className="p-2 rounded-lg text-zinc-400 hover:text-zinc-200 active:scale-95 disabled:opacity-30 transition hover:bg-[#1c1f28] cursor-pointer shrink-0"
               title="Share Image"
             >
               {uploadingImage ? (
-                <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
+                <div className="w-4 h-4 border-2 border-zinc-500 border-t-zinc-200 rounded-full animate-spin"></div>
               ) : (
-                <ImageIcon className="w-5 h-5" />
+                <ImageIcon className="w-4 h-4" />
               )}
             </button>
 
-            {/* GIF Button */}
             <button 
-              type="button"
+              type="button" 
               disabled={status !== 'connected'}
               onClick={() => setShowGifPicker(!showGifPicker)}
-              className="p-2 rounded-xl text-gray-400 hover:text-indigo-400 active:scale-95 disabled:opacity-30 disabled:scale-100 transition hover:bg-white/5 cursor-pointer shrink-0"
+              className="p-2 rounded-lg text-zinc-400 hover:text-zinc-200 active:scale-95 disabled:opacity-30 transition hover:bg-[#1c1f28] cursor-pointer shrink-0"
               title="Add Reaction GIF"
             >
-              <Smile className="w-5 h-5" />
+              <Smile className="w-4 h-4" />
             </button>
 
-            {/* Input field */}
             <input
               type="text"
-              placeholder={status === 'connected' ? "Type a message..." : "Connect to start chatting"}
+              placeholder={status === 'connected' ? "Type a message..." : "Connect to chat"}
               value={inputText}
               disabled={status !== 'connected'}
               onChange={(e) => setInputText(e.target.value)}
-              className="flex-1 py-2 px-4 bg-black/40 border border-white/10 rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 disabled:opacity-50 text-sm"
+              className="flex-1 py-1.5 px-3 bg-[#0e1013] border border-[#262b35] rounded-lg text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-400 disabled:opacity-50 text-xs"
             />
 
-            {/* Send submit button */}
             <button
               type="submit"
               disabled={status !== 'connected' || !inputText.trim()}
-              className="p-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-800 disabled:text-gray-600 text-white transition active:scale-95 cursor-pointer disabled:scale-100 shrink-0"
+              className="p-2 rounded-lg bg-zinc-100 hover:bg-white disabled:bg-[#1a1d24] disabled:text-zinc-600 text-zinc-900 transition active:scale-95 cursor-pointer disabled:cursor-not-allowed shrink-0"
             >
-              <Send className="w-4 h-4" />
+              <Send className="w-3.5 h-3.5" />
             </button>
           </div>
         </form>
@@ -715,39 +701,39 @@ export default function ChatRoom({ socket, token, user }) {
 
       {/* REPORT MODAL */}
       {showReportModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
-          <div className="w-full max-w-md bg-gray-900 border border-white/10 rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center gap-3 text-amber-500">
-              <ShieldAlert className="w-7 h-7" />
-              <h2 className="text-xl font-bold title-font text-white">Report Misbehavior</h2>
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="w-full max-w-sm bg-[#14161b] border border-[#272b36] rounded-xl p-5 shadow-2xl space-y-3">
+            <div className="flex items-center gap-2.5 text-amber-400">
+              <ShieldAlert className="w-5 h-5" />
+              <h2 className="text-sm font-semibold text-zinc-100">Report User</h2>
             </div>
             
-            <p className="text-xs text-gray-400">
-              Reporting this user will immediately terminate the conversation and block them permanently. They will not be matched with you again.
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Reporting this user will terminate the conversation and block them permanently.
             </p>
 
-            <div className="space-y-2">
-              <label className="text-xs font-semibold text-gray-300 uppercase tracking-wider block">Reason for Report</label>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-zinc-400 block">Reason</label>
               <textarea 
-                placeholder="Describe the misbehavior (e.g. harassment, inappropriate display, offensive language...)"
-                rows={4}
+                placeholder="Describe the issue (e.g. harassment, inappropriate content...)"
+                rows={3}
                 value={reportReason}
                 onChange={(e) => setReportReason(e.target.value)}
-                className="w-full py-2.5 px-3 bg-black/40 border border-white/10 rounded-2xl text-white placeholder-gray-600 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 text-sm"
+                className="w-full py-2 px-3 bg-[#0e1013] border border-[#262b35] rounded-lg text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-400 text-xs"
               />
             </div>
 
-            <div className="flex gap-3 pt-2">
+            <div className="flex gap-2 pt-2">
               <button 
                 onClick={() => setShowReportModal(false)}
-                className="flex-1 py-2 px-4 bg-gray-800 hover:bg-gray-750 text-gray-300 font-semibold rounded-xl text-xs border border-white/5 transition cursor-pointer"
+                className="flex-1 py-2 px-3 bg-[#1e222b] hover:bg-[#252a35] text-zinc-300 font-medium rounded-lg text-xs border border-[#2b313e] transition cursor-pointer"
               >
                 Cancel
               </button>
               <button 
                 onClick={handleReport}
                 disabled={!reportReason.trim()}
-                className="flex-1 py-2 px-4 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-semibold rounded-xl text-xs transition cursor-pointer"
+                className="flex-1 py-2 px-3 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-medium rounded-lg text-xs transition cursor-pointer"
               >
                 Report & Block
               </button>
